@@ -60,6 +60,113 @@ function elaintehtaat_deploy_browse_menu_link(): string {
 }
 
 /**
+ * Delete the Flickr images that have no named photographer.
+ */
+function elaintehtaat_deploy_delete_uncredited_flickr_images(array &$sandbox): string {
+  // The images listed in data/flickr-images-to-delete.txt have no
+  // photographer, or an anonymous one. Their albums lose them, an album left
+  // without media is deleted, and then the media and files go. Deleting a file
+  // also deletes it and its image style derivatives from the bucket.
+  $entity_type_manager = \Drupal::entityTypeManager();
+  $storages = [
+    'albums' => $entity_type_manager->getStorage('node'),
+    'media' => $entity_type_manager->getStorage('media'),
+    'files' => $entity_type_manager->getStorage('file'),
+  ];
+
+  if (!isset($sandbox['queue'])) {
+    $lines = file(__DIR__ . '/data/flickr-images-to-delete.txt', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
+    $uris = [];
+    foreach ($lines as $line) {
+      if (!str_starts_with($line, '#')) {
+        $uris[] = 'public://flickr/' . trim($line);
+      }
+    }
+
+    $fids = $storages['files']->getQuery()
+      ->accessCheck(FALSE)
+      ->condition('uri', $uris, 'IN')
+      ->execute();
+    $mids = $fids ? $storages['media']->getQuery()
+      ->accessCheck(FALSE)
+      ->condition('bundle', 'image')
+      ->condition('field_media_image.target_id', $fids, 'IN')
+      ->execute() : [];
+    $nids = $mids ? $storages['albums']->getQuery()
+      ->accessCheck(FALSE)
+      ->condition('type', 'album')
+      ->condition('field_album_media.target_id', $mids, 'IN')
+      ->execute() : [];
+
+    // Albums first, so that no album refers to deleted media, then the media,
+    // then the files the media used.
+    $sandbox['queue'] = [
+      'albums' => array_values($nids),
+      'media' => array_values($mids),
+      'files' => array_values($fids),
+    ];
+    $sandbox['mids'] = array_fill_keys($mids, TRUE);
+    $sandbox['total'] = count($nids) + count($mids) + count($fids);
+    $sandbox['done'] = 0;
+    $sandbox['counts'] = [
+      'albums deleted' => 0,
+      'albums updated' => 0,
+      'media' => 0,
+      'files' => 0,
+    ];
+  }
+
+  foreach ($sandbox['queue'] as $type => $ids) {
+    if (!$ids) {
+      continue;
+    }
+    $batch = array_splice($sandbox['queue'][$type], 0, 50);
+    $entities = $storages[$type]->loadMultiple($batch);
+
+    if ($type === 'albums') {
+      /** @var \Drupal\node\NodeInterface $album */
+      foreach ($entities as $album) {
+        // Drop references to media that is already gone, too.
+        $items = $album->get('field_album_media');
+        $items->filter(fn ($item) => !isset($sandbox['mids'][$item->target_id]) && $item->entity);
+        if ($items->isEmpty()) {
+          $album->delete();
+          $sandbox['counts']['albums deleted']++;
+          continue;
+        }
+        $album->setNewRevision();
+        $album->setRevisionCreationTime(\Drupal::time()->getRequestTime());
+        $album->setRevisionUserId(1);
+        $album->setRevisionLogMessage('Removed the images that have no named photographer.');
+        $album->save();
+        $sandbox['counts']['albums updated']++;
+      }
+    }
+    else {
+      $storages[$type]->delete($entities);
+      $sandbox['counts'][$type] += count($entities);
+    }
+
+    $sandbox['done'] += count($batch);
+    break;
+  }
+
+  $sandbox['#finished'] = $sandbox['total'] ? $sandbox['done'] / $sandbox['total'] : 1;
+  if ($sandbox['#finished'] < 1) {
+    return '';
+  }
+
+  $counts = $sandbox['counts'];
+  return sprintf(
+    'Deleted %d albums, %d media and %d files; removed images from %d albums.',
+    $counts['albums deleted'],
+    $counts['media'],
+    $counts['files'],
+    $counts['albums updated'],
+  );
+}
+
+/**
  * Creates the path aliases that do not exist yet.
  *
  * @param array<string, array<string, string>> $aliases
