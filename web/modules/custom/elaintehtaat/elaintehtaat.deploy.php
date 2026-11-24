@@ -135,6 +135,8 @@ function elaintehtaat_deploy_delete_uncredited_flickr_images(array &$sandbox): s
           continue;
         }
         $album->setNewRevision();
+        $album->setRevisionCreationTime(\Drupal::time()->getRequestTime());
+        $album->setRevisionUserId(1);
         $album->setRevisionLogMessage('Removed the images that have no named photographer.');
         $album->save();
         $sandbox['counts']['albums updated']++;
