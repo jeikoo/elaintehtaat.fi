@@ -7,6 +7,8 @@
 
 declare(strict_types=1);
 
+use Drupal\node\NodeInterface;
+
 /**
  * Translate the browse and projects page paths to English and Swedish.
  */
@@ -164,6 +166,56 @@ function elaintehtaat_deploy_delete_uncredited_flickr_images(array &$sandbox): s
     $counts['files'],
     $counts['albums updated'],
   );
+}
+
+/**
+ * Move the last image of "Muut kuvat" into its Evijärvi album.
+ */
+function elaintehtaat_deploy_move_evijarvi_image(): string {
+  // Flickr listed photo 54027757364 in no album, so it ended up in "Muut
+  // kuvat". It belongs to "Evijärvi, Turkistarha (1), Elo-, loka- ja
+  // marraskuu 2023": same farm, photographer and numbering, uploaded with
+  // that album's photos. "Muut kuvat" holds nothing else, so it goes.
+  $entity_type_manager = \Drupal::entityTypeManager();
+  $node_storage = $entity_type_manager->getStorage('node');
+  $media = current($entity_type_manager->getStorage('media')->loadByProperties(['uuid' => '840fb763-4ba7-4c3d-8e3a-9e15594e9640']));
+  $from = current($node_storage->loadByProperties(['uuid' => '1fdf6c96-4703-483f-afcf-698232d90404']));
+  $to = current($node_storage->loadByProperties(['uuid' => 'cfb898e8-372e-4cae-ab0f-45e844c97291']));
+  if (!$media || !$to instanceof NodeInterface) {
+    return 'The image or its album is gone; nothing moved.';
+  }
+  $mid = (int) $media->id();
+  $time = \Drupal::time()->getRequestTime();
+
+  $in_target = in_array($mid, array_map('intval', array_column($to->get('field_album_media')->getValue(), 'target_id')), TRUE);
+  if (!$in_target) {
+    $to->get('field_album_media')->appendItem(['target_id' => $mid]);
+    $to->setNewRevision();
+    $to->setRevisionCreationTime($time);
+    $to->setRevisionUserId(1);
+    $to->setRevisionLogMessage('Added the image that was in "Muut kuvat".');
+    $to->save();
+  }
+
+  $other = 'is gone';
+  if ($from instanceof NodeInterface) {
+    $items = $from->get('field_album_media');
+    $items->filter(fn ($item) => (int) $item->target_id !== $mid);
+    if ($items->isEmpty()) {
+      $from->delete();
+      $other = 'was deleted';
+    }
+    else {
+      $from->setNewRevision();
+      $from->setRevisionCreationTime($time);
+      $from->setRevisionUserId(1);
+      $from->setRevisionLogMessage('Moved the Evijärvi image to its album.');
+      $from->save();
+      $other = 'keeps its other images';
+    }
+  }
+
+  return sprintf('Moved media %d to "%s"; "Muut kuvat" %s.', $mid, $to->label(), $other);
 }
 
 /**
